@@ -1,12 +1,154 @@
 import puppeteer from "puppeteer";
 import fs from "fs";
-import { MINECRAFT_NET_URL, VALID_BDS_TYPES } from "./config";
+import { MINECRAFT_NET_URL, VALID_BDS_TYPES, CACHE_DURATION_MS } from "./config";
+
+// Cache structure
+interface CacheEntry {
+  version: string;
+  timestamp: number;
+  refreshing?: boolean;
+}
+
+interface CacheStore {
+  [key: string]: CacheEntry;
+}
+
+// Global cache store
+const versionCache: CacheStore = {};
+
+// Helper function to generate cache key
+function getCacheKey(bdsType: "win" | "linux", bdsPreview: boolean): string {
+  return `${bdsType}-${bdsPreview ? 'preview' : 'stable'}`;
+}
+
+// Check if cache entry is still valid
+function isCacheValid(entry: CacheEntry): boolean {
+  return Date.now() - entry.timestamp < CACHE_DURATION_MS;
+}
+
+// Get cached version if available and valid
+export function getCachedVersion(bdsType: "win" | "linux", bdsPreview: boolean): string | null {
+  const key = getCacheKey(bdsType, bdsPreview);
+  const entry = versionCache[key];
+  
+  if (!entry) {
+    return null;
+  }
+  
+  // Always return cached version if it exists (even if expired)
+  // This ensures we serve from cache while background refresh happens
+  return entry.version;
+}
+
+// Set version in cache
+function setCachedVersion(bdsType: "win" | "linux", bdsPreview: boolean, version: string): void {
+  const key = getCacheKey(bdsType, bdsPreview);
+  versionCache[key] = {
+    version,
+    timestamp: Date.now(),
+    refreshing: false
+  };
+  console.log(`✅ Cached version ${version} for ${key}`);
+}
+
+// Background refresh logic
+async function refreshCacheEntry(bdsType: "win" | "linux", bdsPreview: boolean): Promise<void> {
+  const key = getCacheKey(bdsType, bdsPreview);
+  const entry = versionCache[key];
+  
+  // Prevent multiple concurrent refreshes
+  if (entry?.refreshing) {
+    console.log(`🔄 Cache refresh already in progress for ${key}`);
+    return;
+  }
+  
+  // Mark as refreshing
+  if (entry) {
+    entry.refreshing = true;
+  }
+  
+  try {
+    console.log(`🔄 Background refreshing cache for ${key}...`);
+    const newVersion = await lookupLatestVersionInternal(bdsType, bdsPreview);
+    setCachedVersion(bdsType, bdsPreview, newVersion);
+    console.log(`✅ Background refresh completed for ${key}: ${newVersion}`);
+  } catch (error) {
+    console.error(`❌ Background refresh failed for ${key}:`, error);
+    // Don't update cache on error, keep serving the old cached version
+    if (entry) {
+      entry.refreshing = false;
+    }
+  }
+}
+
+// Check if cache needs refresh and trigger background refresh if needed
+export function checkAndRefreshCache(bdsType: "win" | "linux", bdsPreview: boolean): void {
+  const key = getCacheKey(bdsType, bdsPreview);
+  const entry = versionCache[key];
+  
+  if (!entry || !isCacheValid(entry)) {
+    console.log(`🕒 Cache expired or missing for ${key}, triggering background refresh`);
+    // Don't await - this runs in background
+    refreshCacheEntry(bdsType, bdsPreview).catch(err => {
+      console.error(`Background refresh error for ${key}:`, err);
+    });
+  }
+}
+
+// Initialize cache on startup
+export async function initializeCache(): Promise<void> {
+  console.log("🚀 Initializing version cache on startup...");
+  
+  const combinations = [
+    { type: "win" as const, preview: false },
+    { type: "win" as const, preview: true },
+    { type: "linux" as const, preview: false },
+    { type: "linux" as const, preview: true }
+  ];
+  
+  // Initialize all combinations in parallel
+  const initPromises = combinations.map(async ({ type, preview }) => {
+    try {
+      console.log(`📥 Fetching initial version for ${type} ${preview ? 'preview' : 'stable'}...`);
+      const version = await lookupLatestVersionInternal(type, preview);
+      setCachedVersion(type, preview, version);
+    } catch (error) {
+      console.error(`❌ Failed to initialize cache for ${type} ${preview ? 'preview' : 'stable'}:`, error);
+    }
+  });
+  
+  await Promise.all(initPromises);
+  console.log("✅ Cache initialization completed");
+}
+
+// Main lookup function that uses cache
+export async function lookupLatestVersion(
+  bdsType: "win" | "linux",
+  bdsPreview: boolean
+): Promise<string> {
+  // Check if we have a cached version
+  const cachedVersion = getCachedVersion(bdsType, bdsPreview);
+  
+  if (cachedVersion) {
+    // Trigger background refresh if needed (non-blocking)
+    checkAndRefreshCache(bdsType, bdsPreview);
+    console.log(`📦 Serving cached version for ${bdsType} ${bdsPreview ? 'preview' : 'stable'}: ${cachedVersion}`);
+    return cachedVersion;
+  }
+  
+  // No cached version available, fetch directly
+  console.log(`🔍 No cached version available, fetching directly for ${bdsType} ${bdsPreview ? 'preview' : 'stable'}...`);
+  const version = await lookupLatestVersionInternal(bdsType, bdsPreview);
+  setCachedVersion(bdsType, bdsPreview, version);
+  return version;
+}
 
 /**
+ * Internal function that does the actual scraping (renamed from original lookupLatestVersion)
  * Scrapes Minecraft.net's Bedrock page by actually running its JS.
  * Returns the version string like "1.21.84.1".
  */
-export async function lookupLatestVersion(
+async function lookupLatestVersionInternal(
   bdsType: "win" | "linux",
   bdsPreview: boolean
 ): Promise<string> {
