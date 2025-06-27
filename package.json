@@ -14,7 +14,8 @@
   "license": "ISC",
   "dependencies": {
     "express": "^5.1.0",
-    "puppeteer": "^24.10.2"
+    "puppeteer-core": "^24.10.2",
+    "@sparticuz/chromium": "^133.0.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",

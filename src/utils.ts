@@ -1,4 +1,5 @@
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-core";
+import chromium from "@sparticuz/chromium";
 import fs from "fs";
 import { MINECRAFT_NET_URL, VALID_BDS_TYPES, CACHE_DURATION_MS } from "./config";
 
@@ -156,8 +157,10 @@ async function lookupLatestVersionInternal(
   
   console.log("Launching Puppeteer browser...");
   const browser = await puppeteer.launch({
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    headless: true,
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless,
   });
   const page = await browser.newPage();
   await page.setUserAgent("smell-of-curry/bds-manager");
